@@ -14,19 +14,18 @@
 
 package com.google.android.gms.plus.sample.quickstart;
 
+import com.google.android.gms.auth.GoogleAuthException;
+import com.google.android.gms.auth.GoogleAuthUtil;
+import com.google.android.gms.auth.UserRecoverableAuthException;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GooglePlayServicesUtil;
 import com.google.android.gms.common.SignInButton;
-import com.google.android.gms.common.api.CommonStatusCodes;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.GoogleApiClient.ConnectionCallbacks;
 import com.google.android.gms.common.api.GoogleApiClient.OnConnectionFailedListener;
-import com.google.android.gms.common.api.ResultCallback;
-import com.google.android.gms.plus.People;
-import com.google.android.gms.plus.People.LoadPeopleResult;
+import com.google.android.gms.common.api.Scope;
 import com.google.android.gms.plus.Plus;
 import com.google.android.gms.plus.model.people.Person;
-import com.google.android.gms.plus.model.people.PersonBuffer;
 
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -34,16 +33,15 @@ import android.app.PendingIntent;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentSender.SendIntentException;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.support.v4.app.FragmentActivity;
 import android.util.Log;
 import android.view.View;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.ListView;
 import android.widget.TextView;
 
-import java.util.ArrayList;
+import java.io.IOException;
 
 /**
  * Android Google+ Quickstart activity.
@@ -53,7 +51,7 @@ import java.util.ArrayList;
  */
 public class MainActivity extends FragmentActivity implements
     ConnectionCallbacks, OnConnectionFailedListener,
-    ResultCallback<People.LoadPeopleResult>, View.OnClickListener {
+    View.OnClickListener {
 
   private static final String TAG = "android-plus-quickstart";
 
@@ -66,6 +64,10 @@ public class MainActivity extends FragmentActivity implements
   private static final int DIALOG_PLAY_SERVICES_ERROR = 0;
 
   private static final String SAVED_PROGRESS = "sign_in_progress";
+
+  // TODO import these from where they are defined in the API, if possible
+  private static Scope EMAIL_SCOPE = new Scope("email");
+  private static int REQUEST_CODE_TOKEN_AUTH = 9001;
 
   // GoogleApiClient wraps our service connection to Google Play services and
   // provides access to the users sign in state and Google's APIs.
@@ -100,9 +102,8 @@ public class MainActivity extends FragmentActivity implements
   private Button mSignOutButton;
   private Button mRevokeButton;
   private TextView mStatus;
-  private ListView mCirclesListView;
-  private ArrayAdapter<String> mCirclesAdapter;
-  private ArrayList<String> mCirclesList;
+  private TextView mEmail;
+  private TextView mToken;
 
   @Override
   public void onCreate(Bundle savedInstanceState) {
@@ -113,16 +114,12 @@ public class MainActivity extends FragmentActivity implements
     mSignOutButton = (Button) findViewById(R.id.sign_out_button);
     mRevokeButton = (Button) findViewById(R.id.revoke_access_button);
     mStatus = (TextView) findViewById(R.id.sign_in_status);
-    mCirclesListView = (ListView) findViewById(R.id.circles_list);
+    mEmail = (TextView) findViewById(R.id.email_address);
+    mToken = (TextView) findViewById(R.id.id_token);
 
     mSignInButton.setOnClickListener(this);
     mSignOutButton.setOnClickListener(this);
     mRevokeButton.setOnClickListener(this);
-
-    mCirclesList = new ArrayList<String>();
-    mCirclesAdapter = new ArrayAdapter<String>(
-        this, R.layout.circle_member, mCirclesList);
-    mCirclesListView.setAdapter(mCirclesAdapter);
 
     if (savedInstanceState != null) {
       mSignInProgress = savedInstanceState
@@ -140,7 +137,9 @@ public class MainActivity extends FragmentActivity implements
         .addConnectionCallbacks(this)
         .addOnConnectionFailedListener(this)
         .addApi(Plus.API, Plus.PlusOptions.builder().build())
-        .addScope(Plus.SCOPE_PLUS_LOGIN)
+        // .addScope(Plus.SCOPE_PLUS_LOGIN) // this includes circles and other stuff -- unnecessary for this example
+        .addScope(Plus.SCOPE_PLUS_PROFILE) // this is enough because we don't need personal info, just a basic login
+        .addScope(EMAIL_SCOPE) // we need access to the email address so we can request the token
         .build();
   }
 
@@ -215,15 +214,58 @@ public class MainActivity extends FragmentActivity implements
     mSignOutButton.setEnabled(true);
     mRevokeButton.setEnabled(true);
 
-    // Retrieve some profile information to personalize our app for the user.
+    // Retrieve the user name to personalize our app for the user.
     Person currentUser = Plus.PeopleApi.getCurrentPerson(mGoogleApiClient);
 
     mStatus.setText(String.format(
-        getResources().getString(R.string.signed_in_as),
-        currentUser.getDisplayName()));
+          getResources().getString(R.string.signed_in_as),
+          currentUser.getDisplayName()));
 
-    Plus.PeopleApi.loadVisible(mGoogleApiClient, null)
-        .setResultCallback(this);
+    // Retrieve the email address of the user, so that we can request an id_token.
+    final String currentEmail = Plus.AccountApi.getAccountName(mGoogleApiClient);
+
+    mEmail.setText(String.format(
+            getResources().getString(R.string.email_address),
+            currentEmail));
+
+    // requesting the token in another thread; it is based on: https://stackoverflow.com/questions/17547019/calling-this-from-your-main-thread-can-lead-to-deadlock-and-or-anrs-while-getti/17547891#17547891
+    AsyncTask<Void, Void, String> task = new AsyncTask<Void, Void, String>() {
+      @Override
+      protected String doInBackground(Void... params) {
+          String token = null;
+
+          try {
+              token = GoogleAuthUtil.getToken(
+                      MainActivity.this,
+                      currentEmail,
+                      "oauth2:email");
+          } catch (IOException transientEx) {
+              // Network or server error, try later
+              Log.e(TAG, transientEx.toString());
+          } catch (UserRecoverableAuthException e) {
+              // Recover (with e.getIntent())
+              Log.e(TAG, e.toString());
+              Intent recover = e.getIntent();
+              startActivityForResult(recover, REQUEST_CODE_TOKEN_AUTH);
+          } catch (GoogleAuthException authEx) {
+              // The call is not ever expected to succeed
+              // assuming you have already verified that
+              // Google Play services is installed.
+              Log.e(TAG, authEx.toString());
+          }
+
+          return token;
+      }
+
+      @Override
+      protected void onPostExecute(String token) {
+          mToken.setText(String.format(
+                  getResources().getString(R.string.id_token),
+                  token));
+      }
+
+    };
+    task.execute();
 
     // Indicate that the sign in process is complete.
     mSignInProgress = STATE_DEFAULT;
@@ -326,26 +368,6 @@ public class MainActivity extends FragmentActivity implements
     }
   }
 
-  @Override
-  public void onResult(LoadPeopleResult peopleData) {
-    if (peopleData.getStatus().getStatusCode() == CommonStatusCodes.SUCCESS) {
-      mCirclesList.clear();
-      PersonBuffer personBuffer = peopleData.getPersonBuffer();
-      try {
-          int count = personBuffer.getCount();
-          for (int i = 0; i < count; i++) {
-              mCirclesList.add(personBuffer.get(i).getDisplayName());
-          }
-      } finally {
-          personBuffer.close();
-      }
-
-      mCirclesAdapter.notifyDataSetChanged();
-    } else {
-      Log.e(TAG, "Error requesting visible circles: " + peopleData.getStatus());
-    }
-  }
-
   private void onSignedOut() {
     // Update the UI to reflect that the user is signed out.
     mSignInButton.setEnabled(true);
@@ -353,9 +375,8 @@ public class MainActivity extends FragmentActivity implements
     mRevokeButton.setEnabled(false);
 
     mStatus.setText(R.string.status_signed_out);
-
-    mCirclesList.clear();
-    mCirclesAdapter.notifyDataSetChanged();
+    mEmail.setText(R.string.null_string);
+    mToken.setText(R.string.null_string);
   }
 
   @Override
