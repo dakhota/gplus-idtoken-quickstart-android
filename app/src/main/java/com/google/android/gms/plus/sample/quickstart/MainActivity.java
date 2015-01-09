@@ -49,7 +49,7 @@ import java.io.IOException;
  * Demonstrates Google+ Sign-In and usage of the Google+ APIs to retrieve a
  * users profile information.
  */
-public class MainActivity extends FragmentActivity implements
+public class MainActivity extends Activity implements
     ConnectionCallbacks, OnConnectionFailedListener,
     View.OnClickListener {
 
